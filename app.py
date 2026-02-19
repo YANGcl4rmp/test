@@ -15,7 +15,7 @@ from pathlib import Path
 # 1. 網頁基本設定 (Streamlit)
 # -----------------------------------------------------
 st.set_page_config(page_title="太平區篩檢站選址系統", layout="wide")
-st.title("太平區最適篩檢站配置模擬系統")
+st.title("太平區篩檢站配置模擬")
 
 BASE_DIR = Path(__file__).resolve().parent
 VILL_GEOJSON = BASE_DIR / "Tai-Ping-Ge-Li.json"
@@ -186,4 +186,5 @@ with st.spinner("計算肘部法數據中..."):
     ax.set_xlabel('Number of clusters (K)')
     ax.set_ylabel('SSE')
     ax.grid(True)
+
     st.pyplot(fig)
