@@ -3,7 +3,6 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import folium
-from folium import features
 from streamlit_folium import st_folium
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
@@ -12,6 +11,7 @@ from scipy.spatial.distance import cdist
 import os
 from pathlib import Path
 import requests
+import time  # 新增：用於 API 請求的延遲與重試機制
 
 # -----------------------------------------------------
 # 1. 網頁基本設定 (Streamlit)
@@ -87,7 +87,7 @@ def random_points_in_polygon(polygon, n_points):
         y = np.random.uniform(miny, maxy)
         p = Point(x, y)
         if polygon.contains(p):
-            points.append([p.x, p.y])  # [lon, lat]
+            points.append([p.x, p.y])
     return points
 
 all_points = []
@@ -100,7 +100,7 @@ for idx, row in gdf.iterrows():
 coords = np.array(all_points)
 
 # -----------------------------------------------------
-# 5. K-Means 分群演算法 & 道路吸附 (避開無名巷弄)
+# 5. K-Means 分群演算法 & 道路吸附 (增強版 API)
 # -----------------------------------------------------
 if len(coords) < k_value_input + 1:
     st.warning("模擬點數太少，無法進行分群！")
@@ -108,164 +108,5 @@ if len(coords) < k_value_input + 1:
 
 # 處理山區獨立站邏輯
 if use_remote:
-    # 太平區東邊是山區，以經度前 85% 作為市區與山區的分界
     lon_threshold = np.percentile(coords[:, 0], 85)
-    remote_mask = coords[:, 0] > lon_threshold
-    
-    urban_coords = coords[~remote_mask]
-    remote_coords = coords[remote_mask]
-    
-    # 若有成功分出山區點位
-    if len(remote_coords) > 0 and len(urban_coords) >= k_value_input:
-        remote_center = remote_coords.mean(axis=0)
-        
-        km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
-        km.fit(urban_coords)
-        urban_centers = km.cluster_centers_
-        
-        raw_centers = np.vstack([urban_centers, remote_center])
-        is_remote_flag = [False] * k_value_input + [True]
-        labels = np.argmin(cdist(coords, raw_centers), axis=1)
-    else:
-        # 防呆：如果點數過少無法拆分，退回一般模式
-        km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
-        km.fit(coords)
-        raw_centers = km.cluster_centers_
-        labels = km.labels_
-        is_remote_flag = [False] * k_value_input
-else:
-    # 沒勾選山區，全區一起算
-    km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
-    km.fit(coords)
-    raw_centers = km.cluster_centers_
-    labels = km.labels_
-    is_remote_flag = [False] * k_value_input
-
-# 尋找最近的「有名字」大路 API
-def get_nearest_named_road(lon, lat):
-    url = f"http://router.project-osrm.org/nearest/v1/driving/{lon},{lat}?number=10&radius=2000"
-    try:
-        response = requests.get(url, timeout=3)
-        data = response.json()
-        if data.get("code") == "Ok":
-            for wp in data["waypoints"]:
-                street_name = wp.get("name", "")
-                if street_name: 
-                    return wp["location"][0], wp["location"][1], street_name
-            if data["waypoints"]:
-                wp = data["waypoints"][0]
-                return wp["location"][0], wp["location"][1], "無名道路 / 巷弄"
-    except Exception as e:
-        pass
-    return lon, lat, "未知道路"
-
-snapped_centers = []
-street_names = []
-
-with st.spinner("🌍 正在尋找最近的主要道路..."):
-    for center in raw_centers:
-        lon, lat = center[0], center[1]
-        n_lon, n_lat, s_name = get_nearest_named_road(lon, lat)
-        snapped_centers.append([n_lon, n_lat])
-        street_names.append(s_name)
-
-snapped_centers = np.array(snapped_centers)
-
-# -----------------------------------------------------
-# 6. 繪製互動式地圖 (Folium)
-# -----------------------------------------------------
-st.subheader(f"🗺️ 互動式選址地圖")
-
-center_lat = coords[:, 1].mean()
-center_lon = coords[:, 0].mean()
-
-tiles_url = "OpenStreetMap"
-attr = None
-if map_style == "地形圖 (OpenTopoMap)":
-    tiles_url = "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
-    attr = "Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)"
-
-m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=tiles_url, attr=attr)
-
-# 加入各里邊界與滑鼠懸停資訊
-folium.GeoJson(
-    gdf,
-    style_function=lambda feature: {
-        'fillColor': 'transparent',
-        'color': 'black',
-        'weight': 1.5,
-        'fillOpacity': 0.1
-    },
-    tooltip=folium.GeoJsonTooltip(
-        fields=['里別', '人口數'],
-        aliases=['📍 里名:', '👥 人口數:'],
-        localize=True
-    )
-).add_to(m)
-
-# 畫出模擬人口點
-colors = ["#E63946", "#457B9D", "#2A9D8F", "#F4A261", "#E9C46A", "#8D99AE", "#9B5DE5", "#F15BB5"]
-for i, coord in enumerate(coords):
-    cluster_idx = labels[i]
-    color = colors[cluster_idx % len(colors)]
-    folium.CircleMarker(
-        location=[coord[1], coord[0]],
-        radius=3,
-        color=color,
-        fill=True,
-        fill_color=color,
-        fill_opacity=0.7,
-        weight=0
-    ).add_to(m)
-
-# 畫出篩檢站 (區分市區與山區)
-for i, center in enumerate(snapped_centers): 
-    street = street_names[i]
-    is_remote = is_remote_flag[i]
-    
-    if is_remote:
-        icon_color = "green"
-        icon_shape = "leaf"
-        title_text = "⛰️ 偏遠山區專用篩檢站"
-    else:
-        icon_color = "red"
-        icon_shape = "plus"
-        title_text = f"🏥 市區建議篩檢站 {i+1}"
-    
-    tooltip_html = f"""
-    <div style='font-family: Microsoft JhengHei;'>
-        <b>{title_text}</b><br>
-        🛣️ 位於: <span style='color:blue;'>{street}</span>
-    </div>
-    """
-    
-    folium.Marker(
-        location=[center[1], center[0]],
-        icon=folium.Icon(color=icon_color, icon=icon_shape), 
-        tooltip=tooltip_html
-    ).add_to(m)
-
-# 🚨 關鍵：顯示地圖並關閉自動重整機制
-st_folium(m, width=1000, height=600, returned_objects=[])
-
-# -----------------------------------------------------
-# 7. 顯示肘部法圖表 (Matplotlib)
-# -----------------------------------------------------
-st.subheader("📊 肘部法分析 (Elbow Method)")
-
-with st.spinner("計算肘部法數據中..."):
-    sse = []
-    # 肘部法統一使用全區數據計算以保持趨勢基準一致
-    K_range = range(1, min(11, len(coords)//2))
-    for k in K_range:
-        km_temp = KMeans(n_clusters=k, n_init=5, random_state=42)
-        km_temp.fit(coords)
-        sse.append(km_temp.inertia_)
-
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(K_range, sse, 'bo-', linewidth=2, markersize=8)
-    ax.set_title('Elbow Method')
-    ax.set_xlabel('Number of clusters (K)')
-    ax.set_ylabel('SSE')
-    ax.grid(True)
-    st.pyplot(fig)
+    remote_mask =
