@@ -204,7 +204,7 @@ for i, center in enumerate(snapped_centers): # 改用 snapped_centers
         icon=folium.Icon(color="red", icon="info-sign"), # 換成帶有資訊符號的紅色標記
         tooltip=tooltip_html
     ).add_to(m)
-
+st_folium(m, width=1000, height=600, returned_objects=[])
 # -----------------------------------------------------
 # 7. 顯示肘部法圖表 (Matplotlib)
 # -----------------------------------------------------
@@ -225,3 +225,4 @@ with st.spinner("計算肘部法數據中..."):
     ax.set_ylabel('SSE')
     ax.grid(True)
     st.pyplot(fig)
+
