@@ -10,7 +10,7 @@ from shapely.geometry import Point
 from sklearn.cluster import KMeans
 import os
 from pathlib import Path
-
+import requests
 # -----------------------------------------------------
 # 1. 網頁基本設定 (Streamlit)
 # -----------------------------------------------------
@@ -99,12 +99,43 @@ if len(coords) < k_value_input:
     st.warning("模擬點數太少，無法進行分群！")
     st.stop()
 
-# 為了網頁流暢度，這裡只對單一 K 進行主要分群運算
+# 進行 K-Means 分群
 km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
 km.fit(coords)
-centers = km.cluster_centers_
+raw_centers = km.cluster_centers_  # 這是純數學算出來的原始中心
 labels = km.labels_
 
+# 定義一個呼叫 OSRM API 來尋找最近道路的函數
+def get_nearest_road(lon, lat):
+    # OSRM Nearest API 格式: lon, lat
+    url = f"http://router.project-osrm.org/nearest/v1/driving/{lon},{lat}?number=1"
+    try:
+        response = requests.get(url, timeout=3)
+        data = response.json()
+        if data.get("code") == "Ok":
+            # 抓取最近道路的座標與名稱
+            nearest_lon, nearest_lat = data["waypoints"][0]["location"]
+            street_name = data["waypoints"][0].get("name", "")
+            if not street_name:
+                street_name = "無名道路 / 巷弄"
+            return nearest_lon, nearest_lat, street_name
+    except Exception as e:
+        pass
+    # 如果 API 失敗，就回傳原始座標
+    return lon, lat, "未知道路"
+
+# 開始將每個數學中心點吸附到道路上
+snapped_centers = []
+street_names = []
+
+with st.spinner("🌍 正在將篩檢站對齊至實際道路..."):
+    for center in raw_centers:
+        lon, lat = center[0], center[1]
+        n_lon, n_lat, s_name = get_nearest_road(lon, lat)
+        snapped_centers.append([n_lon, n_lat])
+        street_names.append(s_name)
+
+snapped_centers = np.array(snapped_centers)
 # -----------------------------------------------------
 # 6. 繪製互動式地圖 (Folium)
 # -----------------------------------------------------
@@ -156,16 +187,23 @@ for i, coord in enumerate(coords):
         weight=0
     ).add_to(m)
 
-# 【亮點 3】畫出篩檢站 (大星星)
-for i, center in enumerate(centers):
+# 【亮點 3】畫出篩檢站 (大星星，已對齊道路)
+for i, center in enumerate(snapped_centers): # 改用 snapped_centers
+    street = street_names[i]
+    
+    # 設計超酷的彈出資訊框 (支援 HTML)
+    tooltip_html = f"""
+    <div style='font-family: Microsoft JhengHei;'>
+        <b>🏥 建議篩檢站 {i+1}</b><br>
+        🛣️ 位於: <span style='color:blue;'>{street}</span>
+    </div>
+    """
+    
     folium.Marker(
         location=[center[1], center[0]],
-        icon=folium.Icon(color="red", icon="star"),
-        tooltip=f"🏥 篩檢站 {i+1}"
+        icon=folium.Icon(color="red", icon="info-sign"), # 換成帶有資訊符號的紅色標記
+        tooltip=tooltip_html
     ).add_to(m)
-
-# 顯示地圖
-st_folium(m, width=1000, height=600, returned_objects=[])
 
 # -----------------------------------------------------
 # 7. 顯示肘部法圖表 (Matplotlib)
@@ -186,5 +224,4 @@ with st.spinner("計算肘部法數據中..."):
     ax.set_xlabel('Number of clusters (K)')
     ax.set_ylabel('SSE')
     ax.grid(True)
-
     st.pyplot(fig)
