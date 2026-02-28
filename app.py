@@ -11,7 +11,7 @@ from scipy.spatial.distance import cdist
 import os
 from pathlib import Path
 import requests
-import time  # 新增：用於 API 請求的延遲與重試機制
+import time
 
 # -----------------------------------------------------
 # 1. 網頁基本設定 (Streamlit)
@@ -45,7 +45,7 @@ k_value_input = st.sidebar.slider(
 map_style = st.sidebar.selectbox("🗺️ 地圖底圖樣式", ["街道圖 (OpenStreetMap)", "地形圖 (OpenTopoMap)"])
 
 st.sidebar.markdown("---")
-st.sidebar.info("💡 調整上方參數後，右側的地圖與圖表會即時重新運算！")
+st.sidebar.info("💡 調整上方參數後，右側的地圖與圖表會重新運算 (尋路 API 約需數秒)。")
 
 # -----------------------------------------------------
 # 3. 讀取與處理資料 (使用 cache 加速)
@@ -100,7 +100,7 @@ for idx, row in gdf.iterrows():
 coords = np.array(all_points)
 
 # -----------------------------------------------------
-# 5. K-Means 分群演算法 & 道路吸附 (增強版 API)
+# 5. K-Means 分群演算法 & 道路吸附 (Nominatim API)
 # -----------------------------------------------------
 if len(coords) < k_value_input + 1:
     st.warning("模擬點數太少，無法進行分群！")
@@ -136,34 +136,40 @@ else:
     labels = km.labels_
     is_remote_flag = [False] * k_value_input
 
-# 增強版尋路 API：加入重試機制與流量控制
+# 增強版尋路 API：改用 Nominatim 官方地圖解析，避免雲端 IP 被封鎖
 def get_nearest_named_road(lon, lat, retries=3):
-    url = f"http://router.project-osrm.org/nearest/v1/driving/{lon},{lat}?number=10&radius=3000"
+    url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=17"
+    headers = {"User-Agent": "TaipingScreeningApp/1.0 (Student Project)"}
+    
     for attempt in range(retries):
         try:
-            response = requests.get(url, timeout=5)
-            if response.status_code == 429:
-                time.sleep(1)
-                continue
+            time.sleep(1.1)  # 遵守官方規定，每次請求間隔 1.1 秒
+            response = requests.get(url, headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                address = data.get("address", {})
+                street_name = address.get("road", "")
                 
-            data = response.json()
-            if data.get("code") == "Ok":
-                for wp in data["waypoints"]:
-                    street_name = wp.get("name", "")
-                    if street_name: 
-                        return wp["location"][0], wp["location"][1], street_name
-                if data["waypoints"]:
-                    wp = data["waypoints"][0]
-                    return wp["location"][0], wp["location"][1], "無名道路 / 巷弄"
+                if street_name: 
+                    n_lat = float(data.get("lat", lat))
+                    n_lon = float(data.get("lon", lon))
+                    return n_lon, n_lat, street_name
+                else:
+                    return lon, lat, "無名道路 / 巷弄"
+            else:
+                time.sleep(1)
+                
         except requests.exceptions.RequestException:
-            time.sleep(0.5)
+            time.sleep(1)
             continue
+            
     return lon, lat, "未知道路 (API連線失敗)"
 
 snapped_centers = []
 street_names = []
 
-with st.spinner("🌍 正在尋找最近的主要道路 (若站點較多可能需要數秒鐘)..."):
+with st.spinner("🌍 正在尋找最近的主要道路 (遵守 API 流量限制，請稍候幾秒鐘)..."):
     for center in raw_centers:
         lon, lat = center[0], center[1]
         n_lon, n_lat, s_name = get_nearest_named_road(lon, lat)
@@ -283,7 +289,6 @@ with st.spinner("計算肘部法數據中..."):
     ax.set_ylabel('SSE')
     ax.grid(True)
     
-    # 版面升級：左右兩欄並排顯示
     col1, col2 = st.columns([3, 2])
     
     with col1:
