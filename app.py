@@ -29,7 +29,9 @@ POP_CSV = BASE_DIR / "Xia-Zai.csv"
 st.sidebar.header("⚙️ 參數控制面板")
 
 # 加入偏遠山區開關
-use_remote = st.sidebar.checkbox("⛰️ 獨立設置「偏遠山區」專用站", value=True)
+use_remote = st.sidebar.checkbox("⛰️ 獨立設置「偏遠山區」專用站", value=True
+                                ,help="【選址邏輯】：先找出距離全區人口重心「最遠的 5% 極端偏遠人口」，再獨立計算這群人的中心點來設置此站。確保醫療站真正深入山區，避免重心被市區人口拉回。"
+)
 
 # 讓使用者選擇要模擬的總人口點數
 total_points_input = st.sidebar.slider("👥 模擬人口總點數 (樣本數)", min_value=100, max_value=3000, value=800, step=100)
@@ -329,3 +331,4 @@ with st.spinner("計算肘部法數據中..."):
         st.markdown("#### 📈 詳細數據表")
         df_elbow = pd.DataFrame(table_data)
         st.dataframe(df_elbow, use_container_width=True, hide_index=True)
+
