@@ -109,4 +109,187 @@ if len(coords) < k_value_input + 1:
 # 處理山區獨立站邏輯
 if use_remote:
     lon_threshold = np.percentile(coords[:, 0], 85)
-    remote_mask =
+    remote_mask = coords[:, 0] > lon_threshold
+    
+    urban_coords = coords[~remote_mask]
+    remote_coords = coords[remote_mask]
+    
+    if len(remote_coords) > 0 and len(urban_coords) >= k_value_input:
+        remote_center = remote_coords.mean(axis=0)
+        km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
+        km.fit(urban_coords)
+        urban_centers = km.cluster_centers_
+        
+        raw_centers = np.vstack([urban_centers, remote_center])
+        is_remote_flag = [False] * k_value_input + [True]
+        labels = np.argmin(cdist(coords, raw_centers), axis=1)
+    else:
+        km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
+        km.fit(coords)
+        raw_centers = km.cluster_centers_
+        labels = km.labels_
+        is_remote_flag = [False] * k_value_input
+else:
+    km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
+    km.fit(coords)
+    raw_centers = km.cluster_centers_
+    labels = km.labels_
+    is_remote_flag = [False] * k_value_input
+
+# 增強版尋路 API：加入重試機制與流量控制
+def get_nearest_named_road(lon, lat, retries=3):
+    url = f"http://router.project-osrm.org/nearest/v1/driving/{lon},{lat}?number=10&radius=3000"
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 429:
+                time.sleep(1)
+                continue
+                
+            data = response.json()
+            if data.get("code") == "Ok":
+                for wp in data["waypoints"]:
+                    street_name = wp.get("name", "")
+                    if street_name: 
+                        return wp["location"][0], wp["location"][1], street_name
+                if data["waypoints"]:
+                    wp = data["waypoints"][0]
+                    return wp["location"][0], wp["location"][1], "無名道路 / 巷弄"
+        except requests.exceptions.RequestException:
+            time.sleep(0.5)
+            continue
+    return lon, lat, "未知道路 (API連線失敗)"
+
+snapped_centers = []
+street_names = []
+
+with st.spinner("🌍 正在尋找最近的主要道路 (若站點較多可能需要數秒鐘)..."):
+    for center in raw_centers:
+        lon, lat = center[0], center[1]
+        n_lon, n_lat, s_name = get_nearest_named_road(lon, lat)
+        snapped_centers.append([n_lon, n_lat])
+        street_names.append(s_name)
+
+snapped_centers = np.array(snapped_centers)
+
+# -----------------------------------------------------
+# 6. 繪製互動式地圖 (Folium)
+# -----------------------------------------------------
+st.subheader(f"🗺️ 互動式選址地圖")
+
+center_lat = coords[:, 1].mean()
+center_lon = coords[:, 0].mean()
+
+tiles_url = "OpenStreetMap"
+attr = None
+if map_style == "地形圖 (OpenTopoMap)":
+    tiles_url = "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
+    attr = "Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)"
+
+m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=tiles_url, attr=attr)
+
+folium.GeoJson(
+    gdf,
+    style_function=lambda feature: {
+        'fillColor': 'transparent',
+        'color': 'black',
+        'weight': 1.5,
+        'fillOpacity': 0.1
+    },
+    tooltip=folium.GeoJsonTooltip(
+        fields=['里別', '人口數'],
+        aliases=['📍 里名:', '👥 人口數:'],
+        localize=True
+    )
+).add_to(m)
+
+colors = ["#E63946", "#457B9D", "#2A9D8F", "#F4A261", "#E9C46A", "#8D99AE", "#9B5DE5", "#F15BB5"]
+for i, coord in enumerate(coords):
+    cluster_idx = labels[i]
+    color = colors[cluster_idx % len(colors)]
+    folium.CircleMarker(
+        location=[coord[1], coord[0]],
+        radius=3,
+        color=color,
+        fill=True,
+        fill_color=color,
+        fill_opacity=0.7,
+        weight=0
+    ).add_to(m)
+
+for i, center in enumerate(snapped_centers): 
+    street = street_names[i]
+    is_remote = is_remote_flag[i]
+    
+    if is_remote:
+        icon_color = "green"
+        icon_shape = "leaf"
+        title_text = "⛰️ 偏遠山區專用篩檢站"
+    else:
+        icon_color = "red"
+        icon_shape = "plus"
+        title_text = f"🏥 市區建議篩檢站 {i+1}"
+    
+    tooltip_html = f"""
+    <div style='font-family: Microsoft JhengHei;'>
+        <b>{title_text}</b><br>
+        🛣️ 位於: <span style='color:blue;'>{street}</span>
+    </div>
+    """
+    
+    folium.Marker(
+        location=[center[1], center[0]],
+        icon=folium.Icon(color=icon_color, icon=icon_shape), 
+        tooltip=tooltip_html
+    ).add_to(m)
+
+st_folium(m, width=1000, height=600, returned_objects=[])
+
+# -----------------------------------------------------
+# 7. 顯示肘部法圖表與詳細數據
+# -----------------------------------------------------
+st.subheader("📊 肘部法分析 (Elbow Method)")
+
+with st.spinner("計算肘部法數據中..."):
+    sse = []
+    table_data = []
+    K_range = list(range(1, min(11, len(coords)//2)))
+    
+    for k in K_range:
+        km_temp = KMeans(n_clusters=k, n_init=5, random_state=42)
+        km_temp.fit(coords)
+        current_sse = km_temp.inertia_
+        sse.append(current_sse)
+        
+        if k == 1:
+            drop = 0
+            improvement = 0.0
+        else:
+            prev_sse = sse[-2]
+            drop = prev_sse - current_sse
+            improvement = (drop / prev_sse) * 100
+            
+        table_data.append({
+            "K 值": k,
+            "SSE (誤差平方和)": round(current_sse, 2),
+            "縮小幅度": round(drop, 2) if k > 1 else "-",
+            "改善率 (%)": f"{improvement:.2f}%" if k > 1 else "-"
+        })
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(K_range, sse, 'bo-', linewidth=2, markersize=8)
+    ax.set_title('Elbow Method')
+    ax.set_xlabel('Number of clusters (K)')
+    ax.set_ylabel('SSE')
+    ax.grid(True)
+    
+    # 版面升級：左右兩欄並排顯示
+    col1, col2 = st.columns([3, 2])
+    
+    with col1:
+        st.pyplot(fig)
+        
+    with col2:
+        st.markdown("#### 📈 詳細數據表")
+        df_elbow = pd.DataFrame(table_data)
+        st.dataframe(df_elbow, use_container_width=True, hide_index=True)
