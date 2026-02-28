@@ -100,22 +100,39 @@ for idx, row in gdf.iterrows():
 coords = np.array(all_points)
 
 # -----------------------------------------------------
-# 5. K-Means 分群演算法 & 道路吸附 (Nominatim API)
+# 5. K-Means 分群演算法 & 道路吸附 (回歸極端距離演算法)
 # -----------------------------------------------------
 if len(coords) < k_value_input + 1:
     st.warning("模擬點數太少，無法進行分群！")
     st.stop()
 
-# 處理山區獨立站邏輯
+# 處理山區獨立站邏輯 (回歸 Yang 的極端點距離演算法)
 if use_remote:
-    lon_threshold = np.percentile(coords[:, 0], 85)
-    remote_mask = coords[:, 0] > lon_threshold
+    # 1. 先算出所有人口的整體中心
+    center_data = coords.mean(axis=0)
+    # 2. 計算每個點到整區中心的直線距離
+    d_center = np.linalg.norm(coords - center_data, axis=1)
     
-    urban_coords = coords[~remote_mask]
+    # 3. 抓出距離最遠的 5% (閾值 threshold)
+    threshold = np.percentile(d_center, 95)
+    remote_mask = d_center >= threshold
+    core_mask = ~remote_mask
+    
+    urban_coords = coords[core_mask]
     remote_coords = coords[remote_mask]
     
     if len(remote_coords) > 0 and len(urban_coords) >= k_value_input:
-        remote_center = remote_coords.mean(axis=0)
+        # 4. 為了不被拉回市區，我們只拿「最遠的那幾個人」來算山區篩檢站的位置
+        top_k = max(5, int(len(remote_coords) * 0.3)) # 取最遠的 30% 或至少 5 個人
+        top_k = min(top_k, len(remote_coords))
+        
+        remote_d = d_center[remote_mask]
+        order = np.argsort(remote_d)
+        farthest_coords = remote_coords[order[-top_k:]]
+        
+        # 山區站的精確位置：極端遙遠點的重心
+        remote_center = farthest_coords.mean(axis=0)
+        
         km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
         km.fit(urban_coords)
         urban_centers = km.cluster_centers_
@@ -124,12 +141,14 @@ if use_remote:
         is_remote_flag = [False] * k_value_input + [True]
         labels = np.argmin(cdist(coords, raw_centers), axis=1)
     else:
+        # 防呆：如果點數過少無法拆分，退回一般模式
         km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
         km.fit(coords)
         raw_centers = km.cluster_centers_
         labels = km.labels_
         is_remote_flag = [False] * k_value_input
 else:
+    # 沒勾選山區，全區一起算
     km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
     km.fit(coords)
     raw_centers = km.cluster_centers_
