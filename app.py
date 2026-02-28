@@ -34,7 +34,6 @@ use_remote = st.sidebar.checkbox("⛰️ 獨立設置「偏遠山區」專用站
 # 讓使用者選擇要模擬的總人口點數
 total_points_input = st.sidebar.slider("👥 模擬人口總點數 (樣本數)", min_value=100, max_value=3000, value=800, step=100)
 
-# 修改 K 值說明
 k_value_input = st.sidebar.slider(
     "🏥 市區篩檢站數量 (K值)", 
     min_value=1, max_value=8, value=3, step=1, 
@@ -60,10 +59,8 @@ def load_and_merge_data():
     df_pop = pd.read_csv(POP_CSV, encoding="cp950")
     df_pop["人口數"] = df_pop["人口數"].astype(str).str.replace(",", "").astype(int)
     
-    # 合併圖資與人口
     gdf = gdf_vill.merge(df_pop, left_on="VILLNAME", right_on="里別", how="inner")
     
-    # 確保座標系為經緯度 (EPSG:4326) 以供 Folium 使用
     if gdf.crs is None or gdf.crs.to_string() != "EPSG:4326":
         gdf = gdf.to_crs(epsg=4326)
         
@@ -100,20 +97,16 @@ for idx, row in gdf.iterrows():
 coords = np.array(all_points)
 
 # -----------------------------------------------------
-# 5. K-Means 分群演算法 & 道路吸附 (回歸極端距離演算法)
+# 5. K-Means 分群演算法 & 大馬路吸附 (Overpass API)
 # -----------------------------------------------------
 if len(coords) < k_value_input + 1:
     st.warning("模擬點數太少，無法進行分群！")
     st.stop()
 
-# 處理山區獨立站邏輯 (回歸 Yang 的極端點距離演算法)
 if use_remote:
-    # 1. 先算出所有人口的整體中心
     center_data = coords.mean(axis=0)
-    # 2. 計算每個點到整區中心的直線距離
     d_center = np.linalg.norm(coords - center_data, axis=1)
     
-    # 3. 抓出距離最遠的 5% (閾值 threshold)
     threshold = np.percentile(d_center, 95)
     remote_mask = d_center >= threshold
     core_mask = ~remote_mask
@@ -122,15 +115,13 @@ if use_remote:
     remote_coords = coords[remote_mask]
     
     if len(remote_coords) > 0 and len(urban_coords) >= k_value_input:
-        # 4. 為了不被拉回市區，我們只拿「最遠的那幾個人」來算山區篩檢站的位置
-        top_k = max(5, int(len(remote_coords) * 0.3)) # 取最遠的 30% 或至少 5 個人
+        top_k = max(5, int(len(remote_coords) * 0.3)) 
         top_k = min(top_k, len(remote_coords))
         
         remote_d = d_center[remote_mask]
         order = np.argsort(remote_d)
         farthest_coords = remote_coords[order[-top_k:]]
         
-        # 山區站的精確位置：極端遙遠點的重心
         remote_center = farthest_coords.mean(axis=0)
         
         km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
@@ -141,44 +132,65 @@ if use_remote:
         is_remote_flag = [False] * k_value_input + [True]
         labels = np.argmin(cdist(coords, raw_centers), axis=1)
     else:
-        # 防呆：如果點數過少無法拆分，退回一般模式
         km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
         km.fit(coords)
         raw_centers = km.cluster_centers_
         labels = km.labels_
         is_remote_flag = [False] * k_value_input
 else:
-    # 沒勾選山區，全區一起算
     km = KMeans(n_clusters=k_value_input, n_init=10, random_state=42)
     km.fit(coords)
     raw_centers = km.cluster_centers_
     labels = km.labels_
     is_remote_flag = [False] * k_value_input
 
-# 增強版尋路 API：改用 Nominatim 官方地圖解析，避免雲端 IP 被封鎖
-def get_nearest_named_road(lon, lat, retries=3):
-    url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=17"
-    headers = {"User-Agent": "TaipingScreeningApp/1.0 (Student Project)"}
+# 🚀 全新升級：Overpass API 巷弄過濾器
+def get_nearest_major_road(lon, lat, retries=3):
+    overpass_url = "https://overpass-api.de/api/interpreter"
+    
+    # 查詢指令：找出 3000 公尺內，分類為「主幹道、次幹道、一般道路」且有名字的線段
+    overpass_query = f"""
+    [out:json];
+    way(around:3000,{lat},{lon})["highway"~"^(trunk|primary|secondary|tertiary|residential)$"]["name"];
+    out center;
+    """
     
     for attempt in range(retries):
         try:
-            time.sleep(1.1)  # 遵守官方規定，每次請求間隔 1.1 秒
-            response = requests.get(url, headers=headers, timeout=5)
+            time.sleep(1.5)  
+            response = requests.post(overpass_url, data={'data': overpass_query}, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
-                address = data.get("address", {})
-                street_name = address.get("road", "")
+                elements = data.get("elements", [])
                 
-                if street_name: 
-                    n_lat = float(data.get("lat", lat))
-                    n_lon = float(data.get("lon", lon))
-                    return n_lon, n_lat, street_name
+                best_road = None
+                min_dist = float('inf')
+                
+                # 遍歷所有找到的道路，尋找合法且距離最近的
+                for el in elements:
+                    name = el.get("tags", {}).get("name", "")
+                    
+                    # 🚨 核心過濾器：看到「巷」跟「弄」直接淘汰！
+                    if "巷" in name or "弄" in name:
+                        continue
+                        
+                    c_lat = el.get("center", {}).get("lat")
+                    c_lon = el.get("center", {}).get("lon")
+                    
+                    if c_lat and c_lon:
+                        # 計算距離平方來比對遠近
+                        dist = (c_lat - lat)**2 + (c_lon - lon)**2
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_road = (c_lon, c_lat, name)
+                            
+                if best_road:
+                    return best_road
                 else:
-                    return lon, lat, "無名道路 / 巷弄"
+                    return lon, lat, "附近無合適大馬路"
             else:
                 time.sleep(1)
-                
         except requests.exceptions.RequestException:
             time.sleep(1)
             continue
@@ -188,10 +200,10 @@ def get_nearest_named_road(lon, lat, retries=3):
 snapped_centers = []
 street_names = []
 
-with st.spinner("🌍 正在尋找最近的主要道路 (遵守 API 流量限制，請稍候幾秒鐘)..."):
+with st.spinner("🌍 正在尋找最近的大馬路 (自動過濾巷弄，請稍候)..."):
     for center in raw_centers:
         lon, lat = center[0], center[1]
-        n_lon, n_lat, s_name = get_nearest_named_road(lon, lat)
+        n_lon, n_lat, s_name = get_nearest_major_road(lon, lat)
         snapped_centers.append([n_lon, n_lat])
         street_names.append(s_name)
 
