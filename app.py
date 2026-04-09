@@ -28,12 +28,12 @@ POP_CSV = BASE_DIR / "Xia-Zai.csv"
 # -----------------------------------------------------
 st.sidebar.header("⚙️ 參數控制面板")
 
-# 加入偏遠山區開關
-use_remote = st.sidebar.checkbox("⛰️ 獨立設置「偏遠山區」專用站", value=True
-                                ,help="【選址邏輯】：先找出距離全區人口重心「最遠的 5% 極端偏遠人口」，再獨立計算這群人的中心點來設置此站。確保醫療站真正深入山區，避免重心被市區人口拉回。"
+use_remote = st.sidebar.checkbox(
+    "⛰️ 獨立設置「偏遠山區」專用站", 
+    value=True,
+    help="【選址邏輯】：先找出距離全區人口重心「最遠的 5% 極端偏遠人口」，再獨立計算這群人的中心點來設置此站。確保醫療站真正深入山區，避免重心被市區人口拉回。"
 )
 
-# 讓使用者選擇要模擬的總人口點數
 total_points_input = st.sidebar.slider("👥 模擬人口總點數 (樣本數)", min_value=100, max_value=3000, value=800, step=100)
 
 k_value_input = st.sidebar.slider(
@@ -42,7 +42,6 @@ k_value_input = st.sidebar.slider(
     help="注意：此數量為市區站點。若有勾選上方『偏遠山區』，系統會額外再+1個山區站點！"
 )
 
-# 底圖切換
 map_style = st.sidebar.selectbox("🗺️ 地圖底圖樣式", ["街道圖 (OpenStreetMap)", "地形圖 (OpenTopoMap)"])
 
 st.sidebar.markdown("---")
@@ -146,14 +145,14 @@ else:
     labels = km.labels_
     is_remote_flag = [False] * k_value_input
 
-# 🚀 全新升級：Overpass API 巷弄過濾器
+# 🚀 全新升級：Overpass API (避開快速道路、解鎖山區道路)
 def get_nearest_major_road(lon, lat, retries=3):
     overpass_url = "https://overpass-api.de/api/interpreter"
     
-    # 查詢指令：找出 3000 公尺內，分類為「主幹道、次幹道、一般道路」且有名字的線段
+    # 修改 1：拿掉 trunk (避開台74線)，加入 unclassified (解鎖山區有名道路)，範圍擴大到 4000 公尺
     overpass_query = f"""
     [out:json];
-    way(around:3000,{lat},{lon})["highway"~"^(trunk|primary|secondary|tertiary|residential)$"]["name"];
+    way(around:4000,{lat},{lon})["highway"~"^(primary|secondary|tertiary|residential|unclassified)$"]["name"];
     out center;
     """
     
@@ -169,19 +168,18 @@ def get_nearest_major_road(lon, lat, retries=3):
                 best_road = None
                 min_dist = float('inf')
                 
-                # 遍歷所有找到的道路，尋找合法且距離最近的
                 for el in elements:
                     name = el.get("tags", {}).get("name", "")
                     
-                    # 🚨 核心過濾器：看到「巷」跟「弄」直接淘汰！
-                    if "巷" in name or "弄" in name:
+                    # 修改 2：加強過濾器！踢除巷弄，也踢除快速道路、交流道、高架橋
+                    forbidden_keywords = ["巷", "弄", "快速", "交流道", "高架", "國道"]
+                    if any(kw in name for kw in forbidden_keywords):
                         continue
                         
                     c_lat = el.get("center", {}).get("lat")
                     c_lon = el.get("center", {}).get("lon")
                     
                     if c_lat and c_lon:
-                        # 計算距離平方來比對遠近
                         dist = (c_lat - lat)**2 + (c_lon - lon)**2
                         if dist < min_dist:
                             min_dist = dist
@@ -202,7 +200,7 @@ def get_nearest_major_road(lon, lat, retries=3):
 snapped_centers = []
 street_names = []
 
-with st.spinner("🌍 正在尋找最近的大馬路 (自動過濾巷弄，請稍候)..."):
+with st.spinner("🌍 正在尋找最近的實體大馬路 (自動過濾巷弄與高架橋，請稍候)..."):
     for center in raw_centers:
         lon, lat = center[0], center[1]
         n_lon, n_lat, s_name = get_nearest_major_road(lon, lat)
@@ -331,4 +329,3 @@ with st.spinner("計算肘部法數據中..."):
         st.markdown("#### 📈 詳細數據表")
         df_elbow = pd.DataFrame(table_data)
         st.dataframe(df_elbow, use_container_width=True, hide_index=True)
-
