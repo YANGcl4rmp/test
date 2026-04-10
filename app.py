@@ -145,7 +145,7 @@ else:
     labels = km.labels_
     is_remote_flag = [False] * k_value_input
 
-# 🚀 全新升級：Overpass API (加入動態同心圓搜索與防超時機制)
+# 🚀 全新升級：Overpass API (動態同心圓搜索與防超時機制)
 def get_nearest_major_road(lon, lat, retries=3):
     overpass_url = "https://overpass-api.de/api/interpreter"
     
@@ -176,7 +176,7 @@ def get_nearest_major_road(lon, lat, retries=3):
                     for el in elements:
                         name = el.get("tags", {}).get("name", "")
                         
-                        # 嚴格過濾器
+                        # 嚴格過濾器：踢除巷弄，也踢除快速道路、交流道、高架橋
                         forbidden_keywords = ["巷", "弄", "快速", "交流道", "高架", "國道"]
                         if any(kw in name for kw in forbidden_keywords):
                             continue
@@ -190,15 +190,15 @@ def get_nearest_major_road(lon, lat, retries=3):
                                 min_dist = dist
                                 best_road = (c_lon, c_lat, name)
                                 
-                    # 如果在這個半徑內有找到好路，就直接回傳，提早結束！
+                    # 如果在這個半徑內有找到好路，就直接回傳，提早結束
                     if best_road:
                         return best_road
                     
-                    # 如果這個半徑內「有資料，但全部都是巷弄或高架橋」，就 break 進入下一個更大的半徑
+                    # 如果這個半徑內有資料但全部被過濾掉，跳出 attempt 迴圈，進入下一個更大的半徑
                     break 
                     
                 elif response.status_code == 429:
-                    # 如果伺服器覺得我們太頻繁 (Too Many Requests)，多等一下
+                    # 如果伺服器覺得我們請求太頻繁，多等一下再試
                     time.sleep(3)
                 else:
                     time.sleep(1)
@@ -207,6 +207,18 @@ def get_nearest_major_road(lon, lat, retries=3):
                 continue
                 
     return lon, lat, "未知道路 (偏遠山區無合適幹道)"
+
+snapped_centers = []
+street_names = []
+
+with st.spinner("🌍 正在尋找最近的實體大馬路 (動態搜索中，請稍候)..."):
+    for center in raw_centers:
+        lon, lat = center[0], center[1]
+        n_lon, n_lat, s_name = get_nearest_major_road(lon, lat)
+        snapped_centers.append([n_lon, n_lat])
+        street_names.append(s_name)
+
+snapped_centers = np.array(snapped_centers)
 
 # -----------------------------------------------------
 # 6. 繪製互動式地圖 (Folium)
