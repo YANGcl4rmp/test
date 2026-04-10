@@ -145,69 +145,68 @@ else:
     labels = km.labels_
     is_remote_flag = [False] * k_value_input
 
-# 🚀 全新升級：Overpass API (避開快速道路、解鎖山區道路)
+# 🚀 全新升級：Overpass API (加入動態同心圓搜索與防超時機制)
 def get_nearest_major_road(lon, lat, retries=3):
     overpass_url = "https://overpass-api.de/api/interpreter"
     
-    # 修改 1：拿掉 trunk (避開台74線)，加入 unclassified (解鎖山區有名道路)，範圍擴大到 4000 公尺
-    overpass_query = f"""
-    [out:json];
-    way(around:4000,{lat},{lon})["highway"~"^(primary|secondary|tertiary|residential|unclassified)$"]["name"];
-    out center;
-    """
+    # 實作「動態同心圓搜索」：先找近的(1000m)，找不到再擴大範圍(3500m)
+    search_radii = [1000, 3500] 
     
-    for attempt in range(retries):
-        try:
-            time.sleep(1.5)  
-            response = requests.post(overpass_url, data={'data': overpass_query}, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                elements = data.get("elements", [])
+    for radius in search_radii:
+        # 加上 [timeout:20] 告訴伺服器延長處理時間
+        overpass_query = f"""
+        [out:json][timeout:20];
+        way(around:{radius},{lat},{lon})["highway"~"^(primary|secondary|tertiary|residential|unclassified)$"]["name"];
+        out center;
+        """
+        
+        for attempt in range(retries):
+            try:
+                time.sleep(1.5)  
+                # 將 Python 端的等待時間延長至 20 秒
+                response = requests.post(overpass_url, data={'data': overpass_query}, timeout=20)
                 
-                best_road = None
-                min_dist = float('inf')
-                
-                for el in elements:
-                    name = el.get("tags", {}).get("name", "")
+                if response.status_code == 200:
+                    data = response.json()
+                    elements = data.get("elements", [])
                     
-                    # 修改 2：加強過濾器！踢除巷弄，也踢除快速道路、交流道、高架橋
-                    forbidden_keywords = ["巷", "弄", "快速", "交流道", "高架", "國道"]
-                    if any(kw in name for kw in forbidden_keywords):
-                        continue
+                    best_road = None
+                    min_dist = float('inf')
+                    
+                    for el in elements:
+                        name = el.get("tags", {}).get("name", "")
                         
-                    c_lat = el.get("center", {}).get("lat")
-                    c_lon = el.get("center", {}).get("lon")
-                    
-                    if c_lat and c_lon:
-                        dist = (c_lat - lat)**2 + (c_lon - lon)**2
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_road = (c_lon, c_lat, name)
+                        # 嚴格過濾器
+                        forbidden_keywords = ["巷", "弄", "快速", "交流道", "高架", "國道"]
+                        if any(kw in name for kw in forbidden_keywords):
+                            continue
                             
-                if best_road:
-                    return best_road
+                        c_lat = el.get("center", {}).get("lat")
+                        c_lon = el.get("center", {}).get("lon")
+                        
+                        if c_lat and c_lon:
+                            dist = (c_lat - lat)**2 + (c_lon - lon)**2
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_road = (c_lon, c_lat, name)
+                                
+                    # 如果在這個半徑內有找到好路，就直接回傳，提早結束！
+                    if best_road:
+                        return best_road
+                    
+                    # 如果這個半徑內「有資料，但全部都是巷弄或高架橋」，就 break 進入下一個更大的半徑
+                    break 
+                    
+                elif response.status_code == 429:
+                    # 如果伺服器覺得我們太頻繁 (Too Many Requests)，多等一下
+                    time.sleep(3)
                 else:
-                    return lon, lat, "附近無合適大馬路"
-            else:
+                    time.sleep(1)
+            except requests.exceptions.RequestException:
                 time.sleep(1)
-        except requests.exceptions.RequestException:
-            time.sleep(1)
-            continue
-            
-    return lon, lat, "未知道路 (API連線失敗)"
-
-snapped_centers = []
-street_names = []
-
-with st.spinner("🌍 正在尋找最近的實體大馬路 (自動過濾巷弄與高架橋，請稍候)..."):
-    for center in raw_centers:
-        lon, lat = center[0], center[1]
-        n_lon, n_lat, s_name = get_nearest_major_road(lon, lat)
-        snapped_centers.append([n_lon, n_lat])
-        street_names.append(s_name)
-
-snapped_centers = np.array(snapped_centers)
+                continue
+                
+    return lon, lat, "未知道路 (偏遠山區無合適幹道)"
 
 # -----------------------------------------------------
 # 6. 繪製互動式地圖 (Folium)
